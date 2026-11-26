@@ -39,8 +39,15 @@ jobs:
           base = 'export PYENV_ROOT="$HOME/.pyenv"; export PATH="$PYENV_ROOT/bin:$PATH"; eval "$(pyenv init -)"'
           venv = base + '; eval "$(pyenv virtualenv-init -)"'
           hook = venv + '; mkdir -p "$HOME/p"; cd "$HOME/p"; _pyenv_virtualenv_hook; ' \
-                 'for i in 1 2 3 4 5 6 7 8 9 10; do _pyenv_virtualenv_hook; done'
+                 '[ -n "$ZSH_VERSION" ] && zmodload zsh/datetime; s=$EPOCHREALTIME; ' \
+                 'i=0; while [ $i -lt 50 ]; do _pyenv_virtualenv_hook; i=$((i+1)); done; ' \
+                 'echo "$s $EPOCHREALTIME"'
           N = 30
+          def hook_ms(shell):
+              out = subprocess.run([shell, "-c", hook], capture_output=True, text=True).stdout.split()
+              if len(out) < 2 or not out[-2] or not out[-1]:
+                  return None
+              return (float(out[-1]) - float(out[-2])) * 1000 / 50
           def run(shell, script):
               ts = []
               for _ in range(N + 3):
@@ -52,9 +59,11 @@ jobs:
               return statistics.median(ts), ts[int(len(ts) * 0.9) - 1]
           rows = []
           for shell in ("bash", "zsh"):
-              b = run(shell, base); v = run(shell, venv); h = run(shell, hook)
+              b = run(shell, base); v = run(shell, venv)
+              hs = sorted(x for x in (hook_ms(shell) for _ in range(5)) if x is not None)
+              h = f"{statistics.median(hs):.2f}" if hs else "n/a (no EPOCHREALTIME)"
               rows.append(f"| {os.environ['REF']} | {shell} | {b[0]:.0f} / {b[1]:.0f} | {v[0]:.0f} / {v[1]:.0f} "
-                          f"| {v[0]-b[0]:.0f} | {(h[0]-v[0])/11:.1f} |")
+                          f"| {v[0]-b[0]:.0f} | {h} |")
           out = ["| ref | shell | pyenv init (median / p90 ms) | + virtualenv-init (median / p90 ms) "
                  "| virtualenv-init cost (ms) | hook per call, unchanged dir (ms) |",
                  "|---|---|---|---|---|---|"] + rows
