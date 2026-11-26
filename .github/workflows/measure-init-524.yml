@@ -1,0 +1,66 @@
+name: measure virtualenv-init (#524)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [measure-init-524]
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        ref: [v1.4.1, master]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Install zsh
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zsh
+
+      - name: Set up pyenv and pyenv-virtualenv
+        run: |
+          git clone -q --depth 1 https://github.com/pyenv/pyenv.git "$HOME/.pyenv"
+          git clone -q https://github.com/pyenv/pyenv-virtualenv.git "$HOME/.pyenv/plugins/pyenv-virtualenv"
+          git -C "$HOME/.pyenv/plugins/pyenv-virtualenv" checkout -q "${{ matrix.ref }}"
+          git -C "$HOME/.pyenv" log -1 --format='pyenv %h %cs'
+          git -C "$HOME/.pyenv/plugins/pyenv-virtualenv" log -1 --format='pyenv-virtualenv %h %cs'
+
+      - name: Measure
+        env:
+          REF: ${{ matrix.ref }}
+        run: |
+          cat > "$RUNNER_TEMP/measure.py" <<'EOF'
+          import os, statistics, subprocess, time
+          home = os.environ["HOME"]
+          base = 'export PYENV_ROOT="$HOME/.pyenv"; export PATH="$PYENV_ROOT/bin:$PATH"; eval "$(pyenv init -)"'
+          venv = base + '; eval "$(pyenv virtualenv-init -)"'
+          hook = venv + '; mkdir -p "$HOME/p"; cd "$HOME/p"; _pyenv_virtualenv_hook; ' \
+                 'for i in 1 2 3 4 5 6 7 8 9 10; do _pyenv_virtualenv_hook; done'
+          N = 30
+          def run(shell, script):
+              ts = []
+              for _ in range(N + 3):
+                  t = time.perf_counter()
+                  subprocess.run([shell, "-c", script], check=True,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                  ts.append((time.perf_counter() - t) * 1000)
+              ts = sorted(ts[3:])
+              return statistics.median(ts), ts[int(len(ts) * 0.9) - 1]
+          rows = []
+          for shell in ("bash", "zsh"):
+              b = run(shell, base); v = run(shell, venv); h = run(shell, hook)
+              rows.append(f"| {os.environ['REF']} | {shell} | {b[0]:.0f} / {b[1]:.0f} | {v[0]:.0f} / {v[1]:.0f} "
+                          f"| {v[0]-b[0]:.0f} | {(h[0]-v[0])/11:.1f} |")
+          out = ["| ref | shell | pyenv init (median / p90 ms) | + virtualenv-init (median / p90 ms) "
+                 "| virtualenv-init cost (ms) | hook per call, unchanged dir (ms) |",
+                 "|---|---|---|---|---|---|"] + rows
+          text = "\n".join(out)
+          print(text)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write(f"### {os.uname().sysname} {os.environ['REF']}\n\n{text}\n\n")
+          EOF
+          python3 "$RUNNER_TEMP/measure.py"
